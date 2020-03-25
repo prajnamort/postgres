@@ -877,8 +877,38 @@ DefineIndex(Oid relationId,
 			{
 				if (key->partattrs[i] == indexInfo->ii_IndexAttrNumbers[j])
 				{
-					found = true;
-					break;
+					/*
+					 * Check the equality operator in both the index's operator
+					 * class and the partition key's operator class. They must
+					 * be the same operator for us to consider them compatible.
+					 */
+					int ptkey_eq_strategy;
+					Oid ptkey_eqop;
+					Oid idxcol_opclass;
+					Oid idxcol_opfamily;
+					Oid idxcol_opclass_intype;
+					Oid idxcol_eqop;
+
+					if (key->strategy == PARTITION_STRATEGY_HASH)
+						ptkey_eq_strategy = HTEqualStrategyNumber;
+					else
+						ptkey_eq_strategy = BTEqualStrategyNumber;
+					ptkey_eqop = get_opfamily_member(key->partopfamily[i],
+													 key->partopcintype[i],
+													 key->partopcintype[i],
+													 ptkey_eq_strategy);
+					idxcol_opclass = classObjectId[j];
+					idxcol_opfamily = get_opclass_family(idxcol_opclass);
+					idxcol_opclass_intype = get_opclass_input_type(idxcol_opclass);
+					idxcol_eqop = get_opfamily_member(idxcol_opfamily,
+													  idxcol_opclass_intype,
+													  idxcol_opclass_intype,
+													  BTEqualStrategyNumber);
+					if (ptkey_eqop == idxcol_eqop)
+					{
+						found = true;
+						break;
+					}
 				}
 			}
 			if (!found)

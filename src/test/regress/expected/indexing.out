@@ -1336,3 +1336,117 @@ Indexes:
     "parted_index_col_drop11_b_idx" btree (b)
 
 drop table parted_index_col_drop;
+--
+-- Test for checking operator class compatibility between partition key and
+-- unique index. If they are imcompatible, the unique index should not be
+-- allowed to created.
+--
+CREATE FUNCTION abscmp(int, int) RETURNS INT AS $$
+begin return btint4cmp(abs($1),abs($2)); end;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+CREATE FUNCTION abshashint4(int) RETURNS INT AS $$
+begin return hashint4(abs($1)); end;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+CREATE FUNCTION abshashint4extended(int, bigint) RETURNS BIGINT AS $$
+begin return hashint4extended(abs($1),$2); end;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+CREATE FUNCTION abslt(int, int) RETURNS BOOL AS $$
+begin return abscmp($1,$2) < 0; end;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+CREATE FUNCTION abslte(int, int) RETURNS BOOL AS $$
+begin return abscmp($1,$2) <= 0; end;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+CREATE FUNCTION abseq(int, int) RETURNS BOOL AS $$
+begin return abscmp($1,$2) = 0; end;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+CREATE FUNCTION absgte(int, int) RETURNS BOOL AS $$
+begin return abscmp($1,$2) >= 0; end;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+CREATE FUNCTION absgt(int, int) RETURNS BOOL AS $$
+begin return abscmp($1,$2) > 0; end;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+CREATE OPERATOR |<| (PROCEDURE = abslt, LEFTARG = int, RIGHTARG = int, COMMUTATOR = |>|, HASHES);
+CREATE OPERATOR |<=| (PROCEDURE = abslt, LEFTARG = int, RIGHTARG = int, COMMUTATOR = |>=|, HASHES);
+CREATE OPERATOR |=| (PROCEDURE = abseq, LEFTARG = int, RIGHTARG = int, COMMUTATOR = |=|, HASHES, MERGES);
+CREATE OPERATOR |>=| (PROCEDURE = abslt, LEFTARG = int, RIGHTARG = int, COMMUTATOR = |<=|, HASHES);
+CREATE OPERATOR |>| (PROCEDURE = abslt, LEFTARG = int, RIGHTARG = int, COMMUTATOR = |<|, HASHES);
+CREATE OPERATOR CLASS abs_int_btree_ops FOR TYPE int4
+    USING btree AS
+    OPERATOR 1 |<|,
+    OPERATOR 2 |<=|,
+    OPERATOR 3 |=|,
+    OPERATOR 4 |>=|,
+    OPERATOR 5 |>|,
+    FUNCTION 1 abscmp(int, int);
+CREATE OPERATOR CLASS abs_int_hash_ops FOR TYPE int4
+    USING hash AS
+    OPERATOR 1 |=|,
+    FUNCTION 1 abshashint4(int),
+    FUNCTION 2 abshashint4extended(int, bigint);
+-- default BTREE partition & default BTREE index
+CREATE TABLE ptop_test (a int, b int, c int) PARTITION BY LIST (a);
+CREATE TABLE ptop_test_0 PARTITION OF ptop_test FOR VALUES IN ('0');
+CREATE TABLE ptop_test_p1 PARTITION OF ptop_test FOR VALUES IN ('1');
+CREATE TABLE ptop_test_m1 PARTITION OF ptop_test FOR VALUES IN ('-1');
+CREATE UNIQUE INDEX ptop_test_unq_abs_a ON ptop_test (a abs_int_btree_ops);  -- imcompatible
+ERROR:  insufficient columns in UNIQUE constraint definition
+DETAIL:  UNIQUE constraint on table "ptop_test" lacks column "a" which is part of the partition key.
+CREATE UNIQUE INDEX ptop_test_unq_a ON ptop_test (a);  -- compatible
+DROP INDEX ptop_test_unq_a;
+DROP TABLE ptop_test;
+-- custom BTREE partition & custom BTREE index
+CREATE TABLE ptop_test (a int, b int, c int) PARTITION BY LIST (a abs_int_btree_ops);
+CREATE TABLE ptop_test_0 PARTITION OF ptop_test FOR VALUES IN ('0');
+CREATE TABLE ptop_test_p1 PARTITION OF ptop_test FOR VALUES IN ('1', '-1');
+CREATE UNIQUE INDEX ptop_test_unq_a ON ptop_test (a);  -- imcompatible
+ERROR:  insufficient columns in UNIQUE constraint definition
+DETAIL:  UNIQUE constraint on table "ptop_test" lacks column "a" which is part of the partition key.
+CREATE UNIQUE INDEX ptop_test_unq_abs_a ON ptop_test (a abs_int_btree_ops);  -- compatible
+DROP INDEX ptop_test_unq_abs_a;
+DROP TABLE ptop_test;
+-- default HASH partition & default BTREE index
+CREATE TABLE ptop_test (a int, b int, c int) PARTITION BY HASH (a);
+CREATE TABLE ptop_test_p0 PARTITION OF ptop_test
+    FOR VALUES WITH (MODULUS 3, REMAINDER 0);
+CREATE TABLE ptop_test_p1 PARTITION OF ptop_test
+    FOR VALUES WITH (MODULUS 3, REMAINDER 1);
+CREATE TABLE ptop_test_p2 PARTITION OF ptop_test
+    FOR VALUES WITH (MODULUS 3, REMAINDER 2);
+CREATE UNIQUE INDEX ptop_test_unq_abs_a ON ptop_test (a abs_int_btree_ops);  -- imcompatible
+ERROR:  insufficient columns in UNIQUE constraint definition
+DETAIL:  UNIQUE constraint on table "ptop_test" lacks column "a" which is part of the partition key.
+CREATE UNIQUE INDEX ptop_test_unq_a ON ptop_test (a);  -- compatible
+DROP INDEX ptop_test_unq_a;
+DROP TABLE ptop_test;
+-- custom HASH partition & custom BTREE index
+CREATE TABLE ptop_test (a int, b int, c int) PARTITION BY HASH (a abs_int_hash_ops);
+CREATE TABLE ptop_test_p0 PARTITION OF ptop_test
+    FOR VALUES WITH (MODULUS 3, REMAINDER 0);
+CREATE TABLE ptop_test_p1 PARTITION OF ptop_test
+    FOR VALUES WITH (MODULUS 3, REMAINDER 1);
+CREATE TABLE ptop_test_p2 PARTITION OF ptop_test
+    FOR VALUES WITH (MODULUS 3, REMAINDER 2);
+CREATE UNIQUE INDEX ptop_test_unq_a ON ptop_test (a);  -- imcompatible
+ERROR:  insufficient columns in UNIQUE constraint definition
+DETAIL:  UNIQUE constraint on table "ptop_test" lacks column "a" which is part of the partition key.
+CREATE UNIQUE INDEX ptop_test_unq_abs_a ON ptop_test (a abs_int_btree_ops);  -- compatible
+DROP INDEX ptop_test_unq_abs_a;
+DROP TABLE ptop_test;
+-- Clean up
+DROP OPERATOR CLASS abs_int_btree_ops USING btree;
+DROP OPERATOR FAMILY abs_int_btree_ops USING btree;
+DROP OPERATOR CLASS abs_int_hash_ops USING hash;
+DROP OPERATOR FAMILY abs_int_hash_ops USING hash;
+DROP OPERATOR |<| (int, int);
+DROP OPERATOR |<=| (int, int);
+DROP OPERATOR |=| (int, int);
+DROP OPERATOR |>=| (int, int);
+DROP OPERATOR |>| (int, int);
+DROP FUNCTION abscmp(int, int);
+DROP FUNCTION abslt(int, int);
+DROP FUNCTION abslte(int, int);
+DROP FUNCTION abseq(int, int);
+DROP FUNCTION absgte(int, int);
+DROP FUNCTION absgt(int, int);
+DROP FUNCTION abshashint4(int);
+DROP FUNCTION abshashint4extended(int, bigint);
